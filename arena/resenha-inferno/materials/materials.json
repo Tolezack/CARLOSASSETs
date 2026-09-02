@@ -1,0 +1,5 @@
+{
+  "ground":{"texture":"../textures/ground.svg","roughness":0.95},
+  "wall":{"texture":"../textures/stone-wall.svg","roughness":0.9},
+  "cover":{"texture":"../textures/cover.svg","roughness":0.8}
+}
