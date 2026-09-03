@@ -162,12 +162,18 @@ function unlockArenaAudio() {
 addEventListener('pointerdown', unlockArenaAudio, { once: true, passive: true });
 addEventListener('keydown', unlockArenaAudio, { once: true, passive: true });
 function playArenaSound(sound) {
-  if (!sound?.url || playedSoundIds.has(sound.id)) return;
+  const url = String(sound?.url || '').trim();
+  if (!url || playedSoundIds.has(sound.id)) return;
   playedSoundIds.add(sound.id);
   if (playedSoundIds.size > 300) playedSoundIds.delete(playedSoundIds.values().next().value);
-  let a = audioCache.get(sound.url);
-  if (!a) { a = new Audio(sound.url); a.preload = 'auto'; audioCache.set(sound.url, a); }
-  try { a.pause(); a.currentTime = 0; a.volume = THREE.MathUtils.clamp(Number(sound.volume ?? .85), 0, 1); a.playbackRate = THREE.MathUtils.clamp(Number(sound.pitch ?? 1), .5, 1.8); a.play().catch(() => {}); } catch {}
+  let a = audioCache.get(url);
+  if (!a) { a = new Audio(); a.preload = 'auto'; a.src = url; audioCache.set(url, a); }
+  a.pause(); a.currentTime = 0;
+  a.volume = THREE.MathUtils.clamp(Number(sound.volume ?? .85), 0, 1);
+  // Tiros ficam praticamente no pitch original: 0.98–1.02.
+  a.playbackRate = THREE.MathUtils.clamp(Number(sound.pitch ?? 1), .96, 1.04);
+  const promise = a.play();
+  if (promise?.catch) promise.catch(err => console.debug('Arena sound não reproduzido:', url, err?.message || err));
 }
 function processSoundEvents(list = [], soundboard = {}) {
   for (const e of list) {
@@ -184,8 +190,9 @@ const boardObjects = new Map();
 function createWorldBoard(b) {
   const group = new THREE.Group();
   const plane = new THREE.Mesh(new THREE.PlaneGeometry(5.5, 5.5), new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false }));
-  group.add(plane); group.userData.started = performance.now(); group.userData.finalX = Number(b.x) || CENTER.x; group.userData.finalZ = Number(b.z) || CENTER.z;
-  group.position.set(group.userData.finalX, 5.5, group.userData.finalZ); group.rotation.x = 0;
+  group.add(plane); group.userData.started = performance.now(); group.userData.finalX = Number.isFinite(Number(b.x)) ? Number(b.x) : CENTER.x; group.userData.finalZ = Number.isFinite(Number(b.z)) ? Number(b.z) : CENTER.z;
+  group.userData.finalY = Number.isFinite(Number(b.y)) ? Math.max(0.25, Number(b.y)) : 2.0;
+  group.position.set(group.userData.finalX, group.userData.finalY + 4.5, group.userData.finalZ); group.rotation.x = 0;
   const texture = new THREE.TextureLoader().load(b.image, t => { t.colorSpace = THREE.SRGBColorSpace; plane.material.map = t; plane.material.needsUpdate = true; });
   plane.material.map = texture; boardLayer.add(group); return group;
 }
@@ -195,15 +202,25 @@ function updateWorldBoards(list = []) {
     if (!b?.id || !b.image) continue; seen.add(String(b.id));
     let o = boardObjects.get(String(b.id)); if (!o) { o = createWorldBoard(b); boardObjects.set(String(b.id), o); }
     const age = Math.max(0, performance.now() - Number(b.at || Date.now()));
-    const t = THREE.MathUtils.clamp(age / 900, 0, 1); const eased = 1 - Math.pow(1 - t, 3);
-    o.position.y = 5.5 * (1 - eased) + .12; o.rotation.x = -Math.PI / 2 * eased;
-    o.position.x = Number(b.x) || CENTER.x; o.position.z = Number(b.z) || CENTER.z;
+    const t = THREE.MathUtils.clamp(age / 650, 0, 1); const eased = 1 - Math.pow(1 - t, 3);
+    const finalY = Number.isFinite(Number(b.y)) ? Math.max(0.25, Number(b.y)) : 2.0;
+    o.userData.finalY = finalY;
+    // Cai alguns metros e para no chão; nunca continua descendo para o void.
+    o.position.y = finalY + 4.5 * (1 - eased);
+    o.rotation.x = 0;
+    o.position.x = Number.isFinite(Number(b.x)) ? Number(b.x) : CENTER.x;
+    o.position.z = Number.isFinite(Number(b.z)) ? Number(b.z) : CENTER.z;
   }
-  for (const [id, o] of boardObjects) if (!seen.has(id)) { o.traverse(n => { if (n.material?.map) n.material.map.dispose?.(); n.geometry?.dispose?.(); }); boardLayer.remove(o); boardObjects.delete(id); }
+  // Respostas normais da API podem trazer boards sem a imagem para economizar banda.
+  // Nesse caso NÃO remova os boards que já estão renderizados.
+  if (list.some(b => b?.image)) {
+    for (const [id, o] of boardObjects) if (!seen.has(id)) { o.traverse(n => { if (n.material?.map) n.material.map.dispose?.(); n.geometry?.dispose?.(); }); boardLayer.remove(o); boardObjects.delete(id); }
+  }
 }
 
 let mediaRevision = -1, mediaLoaded = false, mediaSeq = 0;
 let data = null, camMode = 'auto', keys = Object.create(null), yaw = 0, pitch = -.25, pointerLocked = false;
+let viewerPositionSynced = false;
 const freePos = new THREE.Vector3(MAP.size.x / 2, 35, MAP.size.z / 2);
 function setCam(mode) {
   camMode = mode;
@@ -283,7 +300,17 @@ function updateUI(d) {
   const lines = (d.events || []).slice(-8).reverse();
   document.querySelector('#feed').innerHTML = lines.map(e => `<div class="event">${new Date(e.at).toLocaleTimeString()} — ${escapeHtml(e.text || '')}</div>`).join('');
   const c = (d.commentary || []).slice(-1)[0]; if (c) document.querySelector('#commentaryText').textContent = c.text;
-  updateSpectators(d.bettors || []); updateProjectiles(d.projectiles || []); processSoundEvents(d.soundEvents || [], data?.soundboard || d.soundboard || {}); updateWorldBoards(data?.worldBoards || d.worldBoards || []); renderChat(d.chat || []);
+  updateSpectators(d.bettors || []); updateProjectiles(d.projectiles || []); processSoundEvents(d.soundEvents || [], data?.soundboard || d.soundboard || {});
+  if (Array.isArray(d.worldBoards) && d.worldBoards.some(b => b?.image)) updateWorldBoards(d.worldBoards);
+  if (d.viewer?.publicId && !viewerPositionSynced) {
+    const vx = Number(d.viewer.x), vy = Number(d.viewer.y), vz = Number(d.viewer.z);
+    if (Number.isFinite(vx) && Number.isFinite(vy) && Number.isFinite(vz)) {
+      freePos.set(vx, Math.max(2, vy + 1.7), vz);
+      camera.position.copy(freePos);
+      viewerPositionSynced = true;
+    }
+  }
+  renderChat(d.chat || []);
   if (d.serverName) joinServer.textContent = `Servidor: ${d.serverName} · use o nome que está no ranking.`;
   if (d.joined) joinGate.style.display = 'none';
   else joinGate.style.display = 'flex';
@@ -310,6 +337,14 @@ joinButton.addEventListener('click', async () => {
     const p = await r.json();
     if (!r.ok || !p.ok) throw new Error(p.error || 'Player não encontrado.');
     viewer = p.viewerId; viewerName = p.viewer?.name || name;
+    if (p.viewer) {
+      const vx = Number(p.viewer.x), vy = Number(p.viewer.y), vz = Number(p.viewer.z);
+      if (Number.isFinite(vx) && Number.isFinite(vy) && Number.isFinite(vz)) {
+        freePos.set(vx, Math.max(2, vy + 1.7), vz);
+        camera.position.copy(freePos);
+        viewerPositionSynced = true;
+      }
+    }
     localStorage.setItem('carlos-arena-viewer', viewer); localStorage.setItem('carlos-arena-player', viewerName);
     joinRank.textContent = `Rank encontrado: #${p.viewer?.rankPosition || '?' } · ${p.viewer?.name || name}`;
     data = p; updateUI(p); joinGate.style.display = 'none';
