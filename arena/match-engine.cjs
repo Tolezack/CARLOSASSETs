@@ -1,25 +1,78 @@
 'use strict';
 const { MAP, distance, clamp, isWalkable, nearestWalkable, findPath, lineOfSight } = require('./arena-map.cjs');
 const { addCommentary } = require('./commentator.cjs');
+const { SHOT_PITCH_MIN, SHOT_PITCH_MAX } = require('./sound-config.cjs');
 
 const ROUND_LIMIT_MS = 75_000;
 const ROUND_BREAK_MS = 4_000;
 const FIRE_RANGE = 34;
 const MOVE_SPEED = 7.0; // unidades/segundo
 const BOT_RADIUS = 2.4;
-const PATH_REPLAN_MS = 1_000;
+const PATH_REPLAN_MS = 650;
+const SNAPSHOT_MAX_STEP = 3.0;
+const RELOAD_MS = 1_650;
+const BOT_MAGAZINE_SIZE = 3;
+const BOT_RESERVE_AMMO = 9;
+const SUPPLY_PICKUP_RADIUS = 5.0;
+const SHIELD_PICKUP_AMOUNT = 60;
+const SUPPLY_MIN_SPAWN_DISTANCE = 18;
 
 function makeFighter(side, name, profile, forcedSpawn = null) {
   const spawn = nearestWalkable(forcedSpawn || MAP.spawns[side]);
   return {
     side, name, profile, hp: 100, maxHp: 100, armor: 100, energy: 100,
     x: spawn.x, z: spawn.z, rotation: side === 'A' ? Math.PI / 2 : -Math.PI / 2,
-    weapon: 'rifle', ammo: 30, maxAmmo: 30, state: 'moving', intent: 'take-space',
+    weapon: 'rifle', ammo: BOT_MAGAZINE_SIZE, maxAmmo: BOT_MAGAZINE_SIZE, reserveAmmo: BOT_RESERVE_AMMO, state: 'moving', intent: 'take-space',
     target: null, lastKnownEnemy: null, cooldown: 0, reloadAt: 0, kills: 0, deaths: 0,
     shots: 0, hits: 0, lowHpCalled: false, path: [], pathIndex: 0,
     nextReplanAt: 0, strafeSign: side === 'A' ? 1 : -1, stuckTicks: 0,
     lastX: spawn.x, lastZ: spawn.z, lastMoveAt: Date.now(),
   };
+}
+
+function randomSupplyPosition(occupied = []) {
+  for (let i = 0; i < 80; i += 1) {
+    const candidate = nearestWalkable({
+      x: 8 + Math.random() * Math.max(1, MAP.size.x - 16),
+      z: 8 + Math.random() * Math.max(1, MAP.size.z - 16),
+    });
+    if (occupied.every((p) => distance(candidate, p) >= SUPPLY_MIN_SPAWN_DISTANCE)) return candidate;
+  }
+  return nearestWalkable({ x: MAP.size.x / 2, z: MAP.size.z / 2 });
+}
+
+function createRoundSupplies() {
+  const ammo = randomSupplyPosition([MAP.spawns.A, MAP.spawns.B]);
+  const shield = randomSupplyPosition([MAP.spawns.A, MAP.spawns.B, ammo]);
+  return [
+    { id: `ammo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, type: 'ammo', x: ammo.x, z: ammo.z, active: true, amount: BOT_RESERVE_AMMO },
+    { id: `shield-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, type: 'shield', x: shield.x, z: shield.z, active: true, amount: SHIELD_PICKUP_AMOUNT },
+  ];
+}
+
+function activeSupply(match, type) {
+  return (match.supplies || []).find((s) => s.active && (!type || s.type === type)) || null;
+}
+
+function collectSupply(match, f, now) {
+  const supply = (match.supplies || []).find((s) => s.active && distance(f, s) <= SUPPLY_PICKUP_RADIUS);
+  if (!supply) return false;
+  supply.active = false;
+  if (supply.type === 'ammo') {
+    f.ammo = f.maxAmmo;
+    f.reserveAmmo = Math.max(f.reserveAmmo, supply.amount || BOT_RESERVE_AMMO);
+    f.reloadAt = 0;
+    f.state = 'repositioning';
+    f.path = []; f.pathIndex = 0; f.nextReplanAt = now;
+    pushEvent(match, { type: 'ammo_pickup', actor: f.side, text: `${f.name} pegou a caixa de munição e reabasteceu.` }, now);
+  } else if (supply.type === 'shield') {
+    const before = f.armor;
+    f.armor = Math.min(100, f.armor + (supply.amount || SHIELD_PICKUP_AMOUNT));
+    f.state = 'repositioning';
+    f.path = []; f.pathIndex = 0; f.nextReplanAt = now;
+    pushEvent(match, { type: 'shield_pickup', actor: f.side, armor: f.armor, text: `${f.name} pegou o escudo (+${f.armor - before}).` }, now);
+  }
+  return true;
 }
 
 function createMatch() {
@@ -32,12 +85,18 @@ function createMatch() {
   return {
     map: MAP.id, round: 1, score: { A: 0, B: 0 }, roundPhase: 'live',
     roundStartedAt: now, roundEndsAt: now + ROUND_LIMIT_MS, winner: null, finishedAt: null,
-    camera: { mode: 'auto', target: 'overview', reason: 'overview' }, projectiles: [], projectileSeq: 0,
+    camera: { mode: 'auto', target: 'overview', reason: 'overview' }, projectiles: [], projectileSeq: 0, soundEvents: [], supplies: createRoundSupplies(),
     lastTickAt: now, fighters: {
       A: makeFighter('A', 'Rubi', 'entry-fragger', spawnA),
       B: makeFighter('B', 'Trovão', 'anchor-igl', spawnB),
     },
   };
+}
+
+function pushSound(match, name, now, extra = {}) {
+  match.soundEvents = match.soundEvents || [];
+  match.soundEvents.push({ id: `${now}-${match.soundEvents.length}`, at: now, name, ...extra });
+  match.soundEvents = match.soundEvents.slice(-60);
 }
 
 function pushEvent(match, event, now) {
@@ -56,7 +115,7 @@ function resetRound(match, now) {
     const f = match.fighters[side]; const requested = MAP.spawns[side]; const spawn = nearestWalkable(requested);
     Object.assign(f, {
       hp: 100, armor: 100, energy: 100, x: spawn.x, z: spawn.z,
-      ammo: 30, cooldown: 0, reloadAt: 0,
+      ammo: BOT_MAGAZINE_SIZE, reserveAmmo: BOT_RESERVE_AMMO, cooldown: 0, reloadAt: 0,
       state: 'moving', intent: side === 'A' ? 'take-space' : 'hold-site',
       target: null, lastKnownEnemy: null, lowHpCalled: false,
       path: [], pathIndex: 0, nextReplanAt: now, stuckTicks: 0,
@@ -65,7 +124,7 @@ function resetRound(match, now) {
     });
   }
   match.round += 1; match.roundPhase = 'live'; match.roundStartedAt = now;
-  match.roundEndsAt = now + ROUND_LIMIT_MS; match.projectiles = [];
+  match.roundEndsAt = now + ROUND_LIMIT_MS; match.projectiles = []; match.supplies = createRoundSupplies();
   pushEvent(match, { type: 'round_start', actorName: 'Rubi', text: `Round ${match.round} começou.` }, now);
 }
 
@@ -74,23 +133,39 @@ function visible(a, b) { return distance(a, b) <= FIRE_RANGE && lineOfSight(a, b
 function chooseIntent(self, enemy, match) {
   const d = distance(self, enemy);
   const elapsed = Math.max(0, (Date.now() - match.roundStartedAt) / 1000);
+  const seenEnemy = visible(self, enemy);
   if (self.hp < 28) return 'retreat-cover';
-  if (self.ammo <= 3) return 'reload';
-  if (d < 22 && visible(self, enemy)) return 'take-duel';
-  if (enemy.lastKnownEnemy && !visible(self, enemy) && elapsed > 12) return 'investigate';
-  // Abertura: ocupam lados diferentes. Depois, ambos avançam pelo meio e
-  // finalmente caçam o adversário. Isso evita que os dois repitam o mesmo site.
+  if (self.ammo <= 0 && activeSupply(match, 'ammo')) return 'seek-ammo';
+  if (self.ammo <= 0 && self.reserveAmmo > 0) return 'reload';
+  if (self.ammo <= 0 && self.reserveAmmo <= 0) return activeSupply(match, 'ammo') ? 'seek-ammo' : 'retreat-cover';
+  if (self.armor < 45 && activeSupply(match, 'shield') && !seenEnemy) return 'seek-shield';
+  if (self.ammo <= 4 && self.reserveAmmo > 0 && !seenEnemy) return 'reload';
+  if (d < 18 && seenEnemy && self.hp > 45) return 'take-duel';
+  if (enemy.lastKnownEnemy && !seenEnemy && elapsed > 8) return 'investigate';
   if (elapsed < 7) return self.profile === 'entry-fragger' ? 'a-site-hit' : 'hold-site';
-  if (elapsed < 14) return 'mid-control';
-  if (enemy.hp < 60 || elapsed >= 14) return 'pressure';
+  if (elapsed < 15) return self.profile === 'anchor-igl' ? 'mid-control' : 'pressure';
+  if (enemy.hp < 60 || elapsed >= 15) return 'pressure';
   return 'mid-control';
 }
 
 function strategicGoal(f, match) {
   const enemy = match.fighters[f.side === 'A' ? 'B' : 'A'];
-  if (f.intent === 'retreat-cover') {
+  if (f.intent === 'seek-ammo' || f.intent === 'seek-shield') {
+    const type = f.intent === 'seek-ammo' ? 'ammo' : 'shield';
+    const supply = activeSupply(match, type);
+    if (supply) return supply;
+    return MAP.spawns[f.side];
+  }
+  if (f.intent === 'retreat-cover' || f.intent === 'reload') {
     const candidates = MAP.cover.filter(c => isWalkable(c.x, c.z));
-    return candidates.reduce((best, c) => distance(f, c) < distance(f, best) ? c : best, candidates[0] || MAP.spawns[f.side]);
+    const safe = candidates.filter(c => !lineOfSight(c, enemy) && distance(f, c) <= 42);
+    const pool = safe.length ? safe : candidates;
+    return pool.reduce((best, c) => {
+      if (!best) return c;
+      const score = distance(f, c) + (lineOfSight(c, enemy) ? 18 : 0) + Math.abs(distance(c, enemy) - 14) * 0.35;
+      const bestScore = distance(f, best) + (lineOfSight(best, enemy) ? 18 : 0) + Math.abs(distance(best, enemy) - 14) * 0.35;
+      return score < bestScore ? c : best;
+    }, null) || MAP.spawns[f.side];
   }
   if (f.intent === 'take-duel' || f.intent === 'pressure') return enemy;
   if (f.intent === 'investigate' && enemy.lastKnownEnemy) return enemy.lastKnownEnemy;
@@ -153,7 +228,10 @@ function moveToward(f, target, speedPerSecond, evade, dt, now) {
 function fire(match, side, now) {
   const self = match.fighters[side]; const enemy = match.fighters[side === 'A' ? 'B' : 'A'];
   if (self.cooldown > now || self.reloadAt > now || self.ammo <= 0 || !visible(self, enemy) || enemy.hp <= 0) return false;
-  self.ammo -= 1; self.shots += 1; self.cooldown = now + 520;
+  self.ammo -= 1; self.shots += 1; self.cooldown = now + 720;
+  const pitch = Number((SHOT_PITCH_MIN + Math.random() * (SHOT_PITCH_MAX - SHOT_PITCH_MIN)).toFixed(3));
+  pushSound(match, 'rifle-shot', now, { actor: side, pitch, volume: 0.82 });
+  pushEvent(match, { type: 'shot', actor: side, target: side === 'A' ? 'B' : 'A', weapon: self.weapon, ammo: self.ammo, pitch }, now);
   const accuracy = self.profile === 'anchor-igl' ? 0.78 : 0.70;
   const hit = Math.random() < accuracy;
   const range = distance(self, enemy);
@@ -177,6 +255,26 @@ function fire(match, side, now) {
   return true;
 }
 
+function separateFighters(match) {
+  const a = match.fighters.A, b = match.fighters.B;
+  if (a.hp <= 0 || b.hp <= 0) return;
+  const minDistance = BOT_RADIUS * 2.05;
+  const dx = b.x - a.x, dz = b.z - a.z;
+  const d = Math.hypot(dx, dz);
+  if (d >= minDistance) return;
+  const nx = d > 0.001 ? dx / d : 1;
+  const nz = d > 0.001 ? dz / d : 0;
+  const push = (minDistance - Math.max(d, 0.001)) * 0.5 + 0.08;
+  const ax = a.x - nx * push, az = a.z - nz * push;
+  const bx = b.x + nx * push, bz = b.z + nz * push;
+  if (isWalkable(ax, a.z, BOT_RADIUS)) a.x = ax;
+  if (isWalkable(a.x, az, BOT_RADIUS)) a.z = az;
+  if (isWalkable(bx, b.z, BOT_RADIUS)) b.x = bx;
+  if (isWalkable(b.x, bz, BOT_RADIUS)) b.z = bz;
+  a.rotation = Math.atan2(b.x - a.x, b.z - a.z);
+  b.rotation = Math.atan2(a.x - b.x, a.z - b.z);
+}
+
 function tickMatch(match, now = Date.now()) {
   if (!match || match.winner || match.roundPhase === 'finished') return;
   const dt = Math.min(0.35, Math.max(0.05, (now - (match.lastTickAt || now - 250)) / 1000));
@@ -195,11 +293,42 @@ function tickMatch(match, now = Date.now()) {
   for (const side of ['A', 'B']) {
     const f = match.fighters[side], enemy = match.fighters[side === 'A' ? 'B' : 'A'];
     if (f.hp <= 0) continue;
+    if (collectSupply(match, f, now)) continue;
     f.energy = Math.min(100, f.energy + 5 * dt); f.intent = chooseIntent(f, enemy, match);
+    if (f.intent === 'seek-ammo' || f.intent === 'seek-shield') {
+      const goal = strategicGoal(f, match);
+      f.state = f.intent === 'seek-ammo' ? 'seeking-ammo' : 'seeking-shield';
+      moveToward(f, goal, 7.0, false, dt, now);
+      continue;
+    }
     if (f.intent === 'reload') {
-      f.state = 'reloading'; if (!f.reloadAt) f.reloadAt = now + 1800;
-      if (now >= f.reloadAt) { f.ammo = f.maxAmmo; f.reloadAt = 0; f.state = 'moving'; }
-      else moveToward(f, strategicGoal(f, match), 4.5, true, dt, now);
+      const coverGoal = strategicGoal({ ...f, intent: 'retreat-cover' }, match);
+      if (!f.reloadAt) {
+        // Com pente vazio a recarga não pode depender de conseguir chegar à cobertura:
+        // inicia imediatamente para o bot nunca ficar travado com 0 munição.
+        if (f.ammo <= 0) {
+          f.reloadAt = now + RELOAD_MS;
+          f.state = 'reloading';
+          pushSound(match, 'rifle-reload', now, { actor: side, pitch: 1, volume: 0.9 });
+          pushEvent(match, { type: 'reload_start', actor: side, text: `${f.name} ficou sem munição e iniciou a recarga.` }, now);
+        } else {
+          f.state = 'seeking-cover';
+          moveToward(f, coverGoal, 5.8, true, dt, now);
+          if (distance(f, coverGoal) < 4.5) {
+            f.reloadAt = now + RELOAD_MS;
+            f.state = 'reloading';
+            pushSound(match, 'rifle-reload', now, { actor: side, pitch: 1, volume: 0.9 });
+            pushEvent(match, { type: 'reload_start', actor: side, text: `${f.name} entrou em cobertura e iniciou a recarga.` }, now);
+          }
+        }
+      } else if (now >= f.reloadAt) {
+        const needed = f.maxAmmo - f.ammo;
+        const loaded = Math.min(needed, f.reserveAmmo);
+        f.ammo += loaded; f.reserveAmmo -= loaded; f.reloadAt = 0;
+        f.state = 'repositioning';
+        f.strafeSign *= -1; f.path = []; f.pathIndex = 0; f.nextReplanAt = 0;
+        pushEvent(match, { type: 'reload_end', actor: side, ammo: f.ammo, reserveAmmo: f.reserveAmmo, text: `${f.name} terminou a recarga.` }, now);
+      }
       continue;
     }
     const d = distance(f, enemy), hasSight = d <= FIRE_RANGE && visible(f, enemy);
@@ -220,6 +349,7 @@ function tickMatch(match, now = Date.now()) {
       pushEvent(match, { type: 'reposition', actor: side, text: `${f.name} procurou outra rota.` }, now);
     }
   }
+  separateFighters(match);
   const dead = a.hp <= 0 || b.hp <= 0, timed = now >= match.roundEndsAt;
   if (dead || timed) {
     const winner = dead ? (a.hp > 0 ? 'A' : b.hp > 0 ? 'B' : (a.hp >= b.hp ? 'A' : 'B')) : (a.hp === b.hp ? (Math.random() < 0.5 ? 'A' : 'B') : (a.hp > b.hp ? 'A' : 'B'));
@@ -240,4 +370,16 @@ function updateCamera(match, now = Date.now()) {
   match.camera = { mode: 'auto', target, reason: target === 'overview' ? 'rotation' : 'active-duel', at: now };
 }
 
-module.exports = { createMatch, tickMatch, resetRound, ROUND_LIMIT_MS, ROUND_BREAK_MS, FIRE_RANGE };
+
+function snapshotMatch(match, now = Date.now()) {
+  return {
+    at: now,
+    supplies: (match.supplies || []).map((s) => ({ id: s.id, type: s.type, x: s.x, z: s.z, active: s.active })),
+    fighters: Object.fromEntries(['A', 'B'].map(side => {
+      const f = match.fighters[side];
+      return [side, { x: f.x, z: f.z, rotation: f.rotation, state: f.state, ammo: f.ammo }];
+    })),
+  };
+}
+
+module.exports = { createMatch, tickMatch, resetRound, snapshotMatch, ROUND_LIMIT_MS, ROUND_BREAK_MS, FIRE_RANGE };
