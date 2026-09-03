@@ -121,7 +121,7 @@ function updateSpectators(list = []) {
     const key = String(b.userId); seen.add(key);
     let o = spectatorObjects.get(key);
     if (!o) { o = createSpectator(b); spectatorObjects.set(key, o); }
-    const target = Number.isFinite(Number(b.x)) && Number.isFinite(Number(b.z)) ? new THREE.Vector3(Number(b.x), .05, Number(b.z)) : spectatorPosition(i, list.length);
+    const target = Number.isFinite(Number(b.x)) && Number.isFinite(Number(b.z)) ? new THREE.Vector3(Number(b.x), Number.isFinite(Number(b.y)) ? Number(b.y) : .05, Number(b.z)) : spectatorPosition(i, list.length);
     o.userData.target = target; o.userData.rotation = Number(b.rotation || 0); o.visible = true;
     const label = o.children[2]; if (label) label.material.opacity = key === data?.viewer?.publicId ? .72 : .52;
   });
@@ -325,7 +325,7 @@ let lastSpectatorSend = 0;
 function syncSpectatorMovement(now) {
   if (!viewer || camMode !== 'free' || now - lastSpectatorSend < 160) return;
   lastSpectatorSend = now;
-  fetch(`${apiBase}/api/aposta/${encodeURIComponent(id)}/mover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewer, x: freePos.x, z: freePos.z, rotation: yaw }) }).catch(() => {});
+  fetch(`${apiBase}/api/aposta/${encodeURIComponent(id)}/mover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewer, x: freePos.x, y: Math.max(1.7, freePos.y - 1.7), z: freePos.z, rotation: yaw }) }).catch(() => {});
 }
 
 function targetFor() {
