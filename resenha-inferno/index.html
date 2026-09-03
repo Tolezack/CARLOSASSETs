@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CARLOS Arena</title><link rel="stylesheet" href="./arena.css">
+<style>
+#joinGate{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:#050608ee;backdrop-filter:blur(12px)}
+#joinCard{width:min(420px,calc(100vw - 32px));padding:26px;border:1px solid #ffffff22;border-radius:14px;background:#090b0f;box-shadow:0 25px 80px #000b}
+#joinCard h2{margin:0 0 7px;font-size:22px}.muted{opacity:.55;font-size:12px}.joinInput{width:100%;margin:18px 0 8px;padding:12px;border:1px solid #ffffff22;border-radius:8px;background:#050608;color:#fff;outline:none}.joinInput:focus{border-color:#fff6}.joinButton{width:100%;padding:12px}.joinError{min-height:18px;margin-top:8px;color:#ff9b9b;font-size:11px}.joinRank{min-height:18px;font-size:11px;opacity:.7;margin-bottom:10px}
+#chat{position:fixed;left:20px;top:98px;width:330px;z-index:7;background:#07080bd9;border:1px solid #ffffff20;border-radius:10px;backdrop-filter:blur(10px);padding:10px}
+#chatLog{height:180px;overflow:auto;font-size:11px}.chatMsg{padding:5px 0;border-bottom:1px solid #ffffff0a}.chatName{font-weight:900}.chatRank{opacity:.5;font-size:9px}.chatText{word-break:break-word}.chatImg{display:block;max-width:180px;max-height:120px;margin-top:5px;border-radius:6px}.chatForm{display:flex;gap:5px;margin-top:8px}.chatForm input[type=text]{min-width:0;flex:1;padding:8px;border:1px solid #ffffff18;border-radius:6px;background:#050608;color:#fff}.chatForm button{padding:7px 9px}.chatFile{display:none}@media(max-width:850px){#chat{left:10px;top:auto;bottom:110px;width:min(330px,calc(100vw - 20px))}}
+</style>
+</head>
+<body>
+<div id="app">
+<div id="hud"><div class="brand">CARLOS <span>ARENA</span></div><div class="score"><b id="round">ROUND 1</b><strong id="score">0 : 0</strong><small id="phase">CONECTANDO</small></div><div class="live">● AO VIVO <span id="spectators">0</span></div></div>
+<div id="viewport"></div><div id="crosshair">+</div>
+<div id="leftPanel" class="panel"><div class="title">RESENHA INFERNO</div><div id="timer">05:00</div><div id="betting">CONECTANDO</div><div class="pools"><div>RUBI <b id="poolA">0</b></div><div>TROVÃO <b id="poolB">0</b></div></div></div>
+<div id="fighters"><div class="fighter a"><header><b id="nameA">RUBI</b><span id="stateA">ENTRY</span></header><div class="hp"><i id="hpA"></i></div><div class="meta"><span id="armorA">ARM 100</span><span id="ammoA">30 / 30</span></div></div><div class="fighter b"><header><b id="nameB">TROVÃO</b><span id="stateB">ANCHOR</span></header><div class="hp"><i id="hpB"></i></div><div class="meta"><span id="armorB">ARM 100</span><span id="ammoB">30 / 30</span></div></div></div>
+<div id="commentary"><div class="commentaryHead">LOCUTOR CARLOS</div><div id="commentaryText">Aguardando o início...</div></div>
+<div id="feed" class="panel"></div>
+<div id="cameraBar"><button data-cam="auto" class="active">AUTO</button><button data-cam="A">RUBI</button><button data-cam="B">TROVÃO</button><button data-cam="overview">OVERVIEW</button><button data-cam="free">FREE</button></div>
+<div id="help">FREE: clique na cena · WASD: mover · Mouse: olhar · Espaço/Ctrl: subir/descer · Shift: acelerar · 1/2/3/4/5: câmeras · ESC: liberar mouse</div>
+<div id="chat"><div class="commentaryHead">CHAT GLOBAL</div><div id="chatLog"></div><form id="chatForm" class="chatForm"><input id="chatInput" type="text" maxlength="300" placeholder="Fale com a Arena..."><label title="Enviar imagem"><input id="chatFile" class="chatFile" type="file" accept="image/png,image/jpeg,image/gif,image/webp">🖼️</label><button type="submit">ENVIAR</button></form></div>
+<div id="joinGate"><div id="joinCard"><h2>Entrar na Arena</h2><div class="muted" id="joinServer">Digite o nome que está no ranking deste servidor.</div><input id="joinName" class="joinInput" maxlength="80" autocomplete="nickname" placeholder="Nome do player"><div id="joinRank" class="joinRank"></div><button id="joinButton" class="joinButton">ENTRAR COMO ESPECTADOR</button><div id="joinError" class="joinError"></div></div></div>
+</div>
+<script src="./config.js"></script><script type="module" src="./arena.js"></script>
+</body></html>
