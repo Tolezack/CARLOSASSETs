@@ -98,6 +98,71 @@ function makeBot(side) {
 }
 bots.A = makeBot('A'); bots.B = makeBot('B');
 
+// Movimento de rede: o alvo do servidor nunca é aplicado instantaneamente.
+// Cada atualização cria uma pequena janela de interpolação, eliminando o efeito de teleporte.
+const botMotion = {
+  A: { from: new THREE.Vector3(), to: new THREE.Vector3(), started: performance.now(), duration: 220 },
+  B: { from: new THREE.Vector3(), to: new THREE.Vector3(), started: performance.now(), duration: 220 },
+};
+for (const side of ['A', 'B']) botMotion[side].from.copy(bots[side].position);
+
+const supplyLayer = new THREE.Group(); scene.add(supplyLayer);
+const supplyObjects = new Map();
+function createSupplyObject(supply) {
+  const g = new THREE.Group();
+  if (supply.type === 'ammo') {
+    const box = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.15, 1.8), new THREE.MeshStandardMaterial({ color: 0x344b38, roughness: .7 }));
+    box.position.y = .65; g.add(box);
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.72, .18, 1.92), new THREE.MeshStandardMaterial({ color: 0xd3a22c, roughness: .55 }));
+    stripe.position.y = 1.24; g.add(stripe);
+    const label = makeText('MUNIÇÃO', { background: 'rgba(0,0,0,.55)', font: 'bold 16px sans-serif', scaleX: 5.5, scaleY: 1.1 });
+    label.position.y = 2.8; g.add(label);
+  } else {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(1.15, .22, 8, 24), new THREE.MeshStandardMaterial({ color: 0x62b8ff, emissive: 0x1d4f77, emissiveIntensity: .7, roughness: .3 }));
+    ring.rotation.x = Math.PI / 2; ring.position.y = 1.1; g.add(ring);
+    const core = new THREE.Mesh(new THREE.CylinderGeometry(.72, .72, .18, 24), new THREE.MeshStandardMaterial({ color: 0x8bd0ff, emissive: 0x2c719f, emissiveIntensity: .9, roughness: .25 }));
+    core.position.y = .2; g.add(core);
+    const label = makeText('ESCUDO', { background: 'rgba(0,0,0,.55)', font: 'bold 16px sans-serif', scaleX: 4.7, scaleY: 1.1 });
+    label.position.y = 2.8; g.add(label);
+  }
+  supplyLayer.add(g); return g;
+}
+function updateSupplies(list = []) {
+  const seen = new Set();
+  for (const s of list) {
+    if (!s?.active) continue;
+    const key = String(s.id); seen.add(key);
+    let o = supplyObjects.get(key);
+    if (!o) { o = createSupplyObject(s); supplyObjects.set(key, o); }
+    o.position.set(Number(s.x) || 0, 0, Number(s.z) || 0);
+    o.visible = true;
+    o.rotation.y += .008;
+  }
+  for (const [key, o] of supplyObjects) if (!seen.has(key)) o.visible = false;
+}
+
+function createArenaHud() {
+  const style = document.createElement('style');
+  style.textContent = `
+    #arenaHud{position:fixed;inset:0;pointer-events:none;font-family:Inter,system-ui,sans-serif;color:#fff;text-shadow:0 1px 3px #000}
+    #arenaTop{position:absolute;top:18px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:16px;background:rgba(8,10,14,.82);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:10px 18px;backdrop-filter:blur(10px);box-shadow:0 10px 30px rgba(0,0,0,.3)}
+    #arenaScore{font-size:26px;font-weight:900;letter-spacing:2px} #arenaTimer{font-size:14px;font-weight:800;opacity:.8}
+    .arenaCard{position:absolute;top:92px;width:285px;background:rgba(9,12,16,.84);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:12px 14px;backdrop-filter:blur(9px);box-shadow:0 12px 28px rgba(0,0,0,.25)}
+    .arenaCard.a{left:18px}.arenaCard.b{right:18px}.arenaName{font-weight:900;font-size:16px;letter-spacing:1px}.arenaState{float:right;font-size:10px;opacity:.65;margin-top:4px}.arenaBar{height:7px;background:#252a30;border-radius:8px;overflow:hidden;margin:8px 0}.arenaHp{height:100%;width:100%;background:linear-gradient(90deg,#e6e6e6,#8d8d8d);transition:width .15s}.arenaStats{display:flex;justify-content:space-between;font-size:12px;opacity:.9}.arenaAmmo{font-size:20px;font-weight:900;margin-top:6px}.arenaSub{font-size:10px;opacity:.62}
+    #arenaSupplies{position:absolute;left:18px;bottom:18px;background:rgba(9,12,16,.78);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:9px 12px;font-size:11px;min-width:180px}.supplyRow{display:flex;justify-content:space-between;gap:18px;margin:3px 0}.supplyRow b{font-weight:900}
+    #arenaMoment{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);background:rgba(9,12,16,.82);border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:8px 16px;font-size:12px;max-width:min(70vw,720px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  `;
+  document.head.appendChild(style);
+  const hud = document.createElement('div'); hud.id = 'arenaHud';
+  hud.innerHTML = `<div id="arenaTop"><span id="arenaPhase">AO VIVO</span><span id="arenaScore">0 : 0</span><span id="arenaTimer">--</span></div>
+    <div class="arenaCard a"><span id="arenaNameA" class="arenaName">RUBI</span><span id="arenaStateA" class="arenaState">MOVING</span><div class="arenaBar"><div id="arenaHpA" class="arenaHp"></div></div><div class="arenaStats"><span id="arenaArmorA">🛡 100</span><span id="arenaKillsA">☠ 0</span></div><div id="arenaAmmoA" class="arenaAmmo">3 / 9</div><div class="arenaSub">MUNIÇÃO NO PENTE / RESERVA</div></div>
+    <div class="arenaCard b"><span id="arenaNameB" class="arenaName">TROVÃO</span><span id="arenaStateB" class="arenaState">MOVING</span><div class="arenaBar"><div id="arenaHpB" class="arenaHp"></div></div><div class="arenaStats"><span id="arenaArmorB">🛡 100</span><span id="arenaKillsB">☠ 0</span></div><div id="arenaAmmoB" class="arenaAmmo">3 / 9</div><div class="arenaSub">MUNIÇÃO NO PENTE / RESERVA</div></div>
+    <div id="arenaSupplies"><b>SUPRIMENTOS</b><div class="supplyRow"><span>📦 Munição</span><b id="arenaAmmoBox">ATIVA</b></div><div class="supplyRow"><span>🛡 Escudo</span><b id="arenaShieldBox">ATIVO</b></div></div>
+    <div id="arenaMoment">Aguardando combate...</div>`;
+  document.body.appendChild(hud);
+}
+createArenaHud();
+
 const spectatorLayer = new THREE.Group(); scene.add(spectatorLayer);
 const spectatorObjects = new Map();
 function spectatorPosition(index, total) {
@@ -343,14 +408,35 @@ function updateUI(d) {
     document.querySelector('#hp' + side).style.width = `${Math.max(0, f.hp / Math.max(1, f.maxHp) * 100)}%`;
     document.querySelector('#armor' + side).textContent = `ARM ${f.armor}`;
     document.querySelector('#ammo' + side).textContent = `${f.ammo} / ${f.maxAmmo}`;
-    botTargets[side].set(f.x, 0, f.z); botRotations[side] = f.rotation || 0; bots[side].visible = f.hp > 0;
+    const motion = botMotion[side];
+    motion.from.copy(bots[side].position);
+    motion.to.set(Number(f.x) || 0, 0, Number(f.z) || 0);
+    motion.started = performance.now();
+    motion.duration = Math.max(180, Math.min(260, Number(d.snapshot?.at ? Date.now() - d.snapshot.at : 0) + 180));
+    botTargets[side].copy(motion.to); botRotations[side] = f.rotation || 0; bots[side].visible = f.hp > 0;
+    const hudSide = side;
+    document.querySelector('#arenaName' + hudSide).textContent = f.name.toUpperCase();
+    document.querySelector('#arenaState' + hudSide).textContent = String(f.state || 'moving').replaceAll('-', ' ').toUpperCase();
+    document.querySelector('#arenaHp' + hudSide).style.width = `${Math.max(0, f.hp / Math.max(1, f.maxHp) * 100)}%`;
+    document.querySelector('#arenaArmor' + hudSide).textContent = `🛡 ${Math.round(f.armor || 0)}`;
+    document.querySelector('#arenaKills' + hudSide).textContent = `☠ ${f.kills || 0}`;
+    document.querySelector('#arenaAmmo' + hudSide).textContent = `${f.ammo} / ${f.reserveAmmo ?? 0}`;
   }
   document.querySelector('#timer').textContent = d.status === 'betting' ? fmt(d.bettingEndsAt - Date.now()) : d.roundPhase === 'live' ? fmt(d.roundEndsAt - Date.now()) : d.status === 'finished' ? 'FINAL' : 'INTERVALO';
   document.querySelector('#betting').textContent = d.status === 'betting' ? 'APOSTAS ABERTAS' : d.status === 'finished' ? 'ARENA ENCERRADA' : `POOL ${new Intl.NumberFormat('pt-BR').format((d.pool?.A || 0) + (d.pool?.B || 0))}`;
   const lines = (d.events || []).slice(-8).reverse();
+  document.querySelector('#arenaScore').textContent = `${d.score?.A || 0} : ${d.score?.B || 0}`;
+  document.querySelector('#arenaPhase').textContent = phase;
+  document.querySelector('#arenaTimer').textContent = document.querySelector('#timer').textContent;
+  const ammoSupply = (d.supplies || []).find(s => s.type === 'ammo');
+  const shieldSupply = (d.supplies || []).find(s => s.type === 'shield');
+  document.querySelector('#arenaAmmoBox').textContent = ammoSupply?.active ? 'ATIVA' : 'PEGARAM';
+  document.querySelector('#arenaShieldBox').textContent = shieldSupply?.active ? 'ATIVO' : 'PEGARAM';
+  const latestArenaEvent = (d.events || []).slice(-1)[0];
+  if (latestArenaEvent?.text) document.querySelector('#arenaMoment').textContent = latestArenaEvent.text;
   document.querySelector('#feed').innerHTML = lines.map(e => `<div class="event">${new Date(e.at).toLocaleTimeString()} — ${escapeHtml(e.text || '')}</div>`).join('');
   const c = (d.commentary || []).slice(-1)[0]; if (c) document.querySelector('#commentaryText').textContent = c.text;
-  updateSpectators(d.bettors || []); updateProjectiles(d.projectiles || []); processSoundEvents(d.soundEvents || [], data?.soundboard || d.soundboard || {});
+  updateSpectators(d.bettors || []); updateProjectiles(d.projectiles || []); updateSupplies(d.supplies || []); processSoundEvents(d.soundEvents || [], data?.soundboard || d.soundboard || {});
   if (Array.isArray(d.worldBoards) && d.worldBoards.some(b => b?.image)) updateWorldBoards(d.worldBoards);
   if (d.viewer?.publicId && !viewerPositionSynced) {
     const vx = Number(d.viewer.x), vy = Number(d.viewer.y), vz = Number(d.viewer.z);
@@ -469,7 +555,7 @@ function updateFreeCamera() {
 }
 function animate() {
   requestAnimationFrame(animate);
-  for (const side of ['A', 'B']) { bots[side].position.lerp(botTargets[side], .16); bots[side].rotation.y = THREE.MathUtils.lerp(bots[side].rotation.y, botRotations[side], .16); }
+  for (const side of ['A', 'B']) { const m = botMotion[side]; const alpha = THREE.MathUtils.smoothstep(THREE.MathUtils.clamp((performance.now() - m.started) / m.duration, 0, 1), 0, 1); bots[side].position.lerpVectors(m.from, m.to, alpha); bots[side].rotation.y = THREE.MathUtils.lerp(bots[side].rotation.y, botRotations[side], .12); }
   for (const o of spectatorLayer.children) { if (o.userData.target) { o.position.lerp(o.userData.target, .22); o.rotation.y = THREE.MathUtils.lerp(o.rotation.y, Number(o.userData.rotation || 0), .22); } }
   if (camMode === 'free') { updateFreeCamera(); syncSpectatorMovement(performance.now()); }
   else { const t = targetFor(); if (camMode === 'overview' || (camMode === 'auto' && data?.camera?.target === 'overview')) { const desired = CENTER.clone().add(new THREE.Vector3(0, Math.max(62, MAP.size.x * .29), Math.max(12, MAP.size.z * .08))); camera.position.lerp(desired, .035); } else camera.position.lerp(t.clone().add(new THREE.Vector3(-13, 8, -13)), .06); camera.lookAt(t); }
