@@ -20,6 +20,7 @@ const chatLog = document.querySelector('#chatLog');
 const chatForm = document.querySelector('#chatForm');
 const chatInput = document.querySelector('#chatInput');
 const chatFile = document.querySelector('#chatFile');
+if (chatFile) chatFile.accept = 'image/*,audio/*,.mp3,.wav,.ogg,.webm';
 
 joinGate.style.display = 'flex';
 if (viewerName) joinName.value = viewerName;
@@ -56,9 +57,10 @@ grid.position.copy(CENTER); grid.position.y = .02; grid.material.opacity = .22; 
 const matWall = new THREE.MeshStandardMaterial({ color: 0x5b4636, roughness: .9 });
 const matCover = new THREE.MeshStandardMaterial({ color: 0x7b6b52, roughness: .8 });
 const matSite = new THREE.MeshStandardMaterial({ color: 0x8d774d, roughness: .9 });
-for (const [x1, z1, x2, z2] of MAP.walls) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(Math.abs(x2 - x1), .5), 4, Math.max(Math.abs(z2 - z1), .5)), matWall);
-  m.position.set((x1 + x2) / 2, 2, (z1 + z2) / 2); scene.add(m);
+for (const w of MAP.walls) {
+  const [x1, z1, x2, z2] = w;
+  const wallH = Number(w[4]) || 4;
+  const m = new THREE.Mesh(new THREE.BoxGeometry(Math.max(Math.abs(x2 - x1), .5), wallH, Math.max(Math.abs(z2 - z1), .5)), matWall); m.position.set((x1 + x2) / 2, wallH / 2, (z1 + z2) / 2); scene.add(m);
 }
 for (const c of MAP.cover) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(c.w, c.h, c.d), matCover);
@@ -99,9 +101,8 @@ bots.A = makeBot('A'); bots.B = makeBot('B');
 const spectatorLayer = new THREE.Group(); scene.add(spectatorLayer);
 const spectatorObjects = new Map();
 function spectatorPosition(index, total) {
-  // Espectadores ficam nas laterais, fora das rotas dos bots.
   const t = total <= 1 ? .5 : index / (total - 1);
-  return new THREE.Vector3(8 + t * (MAP.size.x - 16), .05, index % 2 ? MAP.size.z - 7 : 7);
+  return new THREE.Vector3(12 + t * (MAP.size.x - 24), .05, index % 2 ? MAP.size.z - 10 : 10);
 }
 function createSpectator(b) {
   const g = new THREE.Group();
@@ -120,7 +121,8 @@ function updateSpectators(list = []) {
     const key = String(b.userId); seen.add(key);
     let o = spectatorObjects.get(key);
     if (!o) { o = createSpectator(b); spectatorObjects.set(key, o); }
-    o.position.copy(spectatorPosition(i, list.length)); o.visible = true;
+    const target = Number.isFinite(Number(b.x)) && Number.isFinite(Number(b.z)) ? new THREE.Vector3(Number(b.x), .05, Number(b.z)) : spectatorPosition(i, list.length);
+    o.userData.target = target; o.userData.rotation = Number(b.rotation || 0); o.visible = true;
     const label = o.children[2]; if (label) label.material.opacity = key === data?.viewer?.publicId ? .72 : .52;
   });
   for (const [key, o] of spectatorObjects) if (!seen.has(key)) o.visible = false;
@@ -150,6 +152,54 @@ function updateProjectiles(projectiles = []) {
   for (const [key, obj] of projectileObjects) if (!seen.has(key)) { obj.geometry.dispose(); obj.visible = false; projectileObjects.delete(key); }
 }
 
+const audioCache = new Map();
+const playedSoundIds = new Set();
+let audioUnlocked = false;
+function unlockArenaAudio() {
+  if (audioUnlocked) return;
+  const a = new Audio(); a.volume = 0; a.play().catch(() => {}); audioUnlocked = true;
+}
+addEventListener('pointerdown', unlockArenaAudio, { once: true, passive: true });
+addEventListener('keydown', unlockArenaAudio, { once: true, passive: true });
+function playArenaSound(sound) {
+  if (!sound?.url || playedSoundIds.has(sound.id)) return;
+  playedSoundIds.add(sound.id);
+  if (playedSoundIds.size > 300) playedSoundIds.delete(playedSoundIds.values().next().value);
+  let a = audioCache.get(sound.url);
+  if (!a) { a = new Audio(sound.url); a.preload = 'auto'; audioCache.set(sound.url, a); }
+  try { a.pause(); a.currentTime = 0; a.volume = THREE.MathUtils.clamp(Number(sound.volume ?? .85), 0, 1); a.playbackRate = THREE.MathUtils.clamp(Number(sound.pitch ?? 1), .5, 1.8); a.play().catch(() => {}); } catch {}
+}
+function processSoundEvents(list = [], soundboard = {}) {
+  for (const e of list) {
+    const sb = soundboard[e.name];
+    if (sb?.url) playArenaSound({ ...e, url: sb.url });
+  }
+}
+
+const boardLayer = new THREE.Group(); scene.add(boardLayer);
+const boardObjects = new Map();
+function createWorldBoard(b) {
+  const group = new THREE.Group();
+  const plane = new THREE.Mesh(new THREE.PlaneGeometry(5.5, 5.5), new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+  group.add(plane); group.userData.started = performance.now(); group.userData.finalX = Number(b.x) || CENTER.x; group.userData.finalZ = Number(b.z) || CENTER.z;
+  group.position.set(group.userData.finalX, 5.5, group.userData.finalZ); group.rotation.x = 0;
+  const texture = new THREE.TextureLoader().load(b.image, t => { t.colorSpace = THREE.SRGBColorSpace; plane.material.map = t; plane.material.needsUpdate = true; });
+  plane.material.map = texture; boardLayer.add(group); return group;
+}
+function updateWorldBoards(list = []) {
+  const seen = new Set();
+  for (const b of list) {
+    if (!b?.id || !b.image) continue; seen.add(String(b.id));
+    let o = boardObjects.get(String(b.id)); if (!o) { o = createWorldBoard(b); boardObjects.set(String(b.id), o); }
+    const age = Math.max(0, performance.now() - Number(b.at || Date.now()));
+    const t = THREE.MathUtils.clamp(age / 900, 0, 1); const eased = 1 - Math.pow(1 - t, 3);
+    o.position.y = 5.5 * (1 - eased) + .12; o.rotation.x = -Math.PI / 2 * eased;
+    o.position.x = Number(b.x) || CENTER.x; o.position.z = Number(b.z) || CENTER.z;
+  }
+  for (const [id, o] of boardObjects) if (!seen.has(id)) { o.traverse(n => { if (n.material?.map) n.material.map.dispose?.(); n.geometry?.dispose?.(); }); boardLayer.remove(o); boardObjects.delete(id); }
+}
+
+let mediaRevision = -1, mediaLoaded = false;
 let data = null, camMode = 'auto', keys = Object.create(null), yaw = 0, pitch = -.25, pointerLocked = false;
 const freePos = new THREE.Vector3(MAP.size.x / 2, 35, MAP.size.z / 2);
 function setCam(mode) {
@@ -171,15 +221,30 @@ function renderChat(list = []) {
   chatLog.innerHTML = list.map(m => {
     const rank = m.rankPosition ? `<span class="chatRank">#${m.rankPosition}</span>` : '';
     const image = m.image ? `<img class="chatImg" src="${escapeHtml(m.image)}" alt="imagem enviada" loading="lazy">` : '';
-    return `<div class="chatMsg"><span class="chatName">${escapeHtml(m.name)}</span> ${rank}<div class="chatText">${escapeHtml(m.message || '')}</div>${image}</div>`;
+    const audio = m.audioName ? `<div class="chatAudio">🔊 soundboard: ${escapeHtml(m.audioName)}</div>` : '';
+    return `<div class="chatMsg"><span class="chatName">${escapeHtml(m.name)}</span> ${rank}<div class="chatText">${escapeHtml(m.message || '')}</div>${image}${audio}</div>`;
   }).join('');
   chatLog.scrollTop = chatLog.scrollHeight;
 }
+async function refreshArenaMedia(revision) {
+  if (!id || revision === mediaRevision) return;
+  try {
+    const r = await fetch(`${apiBase}/api/aposta/${encodeURIComponent(id)}?viewer=${encodeURIComponent(viewer || '')}&media=1`, { cache: 'no-store' });
+    const p = await r.json();
+    if (r.ok && p.ok) {
+      mediaRevision = Number(p.mediaRevision ?? revision);
+      if (data) { data.soundboard = p.soundboard || {}; data.worldBoards = p.worldBoards || []; }
+      mediaLoaded = true;
+    }
+  } catch {}
+}
+
 function updateUI(d) {
   document.querySelector('#round').textContent = `ROUND ${d.round || 1}`;
   document.querySelector('#score').textContent = `${d.score?.A || 0} : ${d.score?.B || 0}`;
   const phase = d.status === 'betting' ? 'APOSTAS' : d.roundPhase === 'break' ? 'INTERVALO' : d.status === 'finished' ? 'FIM' : 'AO VIVO';
   document.querySelector('#phase').textContent = phase; if (connection) connection.textContent = phase;
+  if (d.mediaRevision !== mediaRevision) void refreshArenaMedia(Number(d.mediaRevision || 0));
   document.querySelector('#spectators').textContent = d.spectators || 0;
   document.querySelector('#poolA').textContent = new Intl.NumberFormat('pt-BR').format(d.pool?.A || 0);
   document.querySelector('#poolB').textContent = new Intl.NumberFormat('pt-BR').format(d.pool?.B || 0);
@@ -197,7 +262,7 @@ function updateUI(d) {
   const lines = (d.events || []).slice(-8).reverse();
   document.querySelector('#feed').innerHTML = lines.map(e => `<div class="event">${new Date(e.at).toLocaleTimeString()} — ${escapeHtml(e.text || '')}</div>`).join('');
   const c = (d.commentary || []).slice(-1)[0]; if (c) document.querySelector('#commentaryText').textContent = c.text;
-  updateSpectators(d.bettors || []); updateProjectiles(d.projectiles || []); renderChat(d.chat || []);
+  updateSpectators(d.bettors || []); updateProjectiles(d.projectiles || []); processSoundEvents(d.soundEvents || [], data?.soundboard || d.soundboard || {}); updateWorldBoards(data?.worldBoards || d.worldBoards || []); renderChat(d.chat || []);
   if (d.serverName) joinServer.textContent = `Servidor: ${d.serverName} · use o nome que está no ranking.`;
   if (d.joined) joinGate.style.display = 'none';
   else joinGate.style.display = 'flex';
@@ -211,7 +276,7 @@ async function poll() {
   } catch (e) {
     console.warn('Arena API', e); document.querySelector('#phase').textContent = 'RECONECTANDO'; if (connection) connection.textContent = 'RECONECTANDO';
   }
-  setTimeout(poll, 700);
+  setTimeout(poll, 180);
 }
 
 joinButton.addEventListener('click', async () => {
@@ -239,17 +304,29 @@ chatForm.addEventListener('submit', async e => {
   if (!viewer) { joinGate.style.display = 'flex'; return; }
   let image = null;
   const file = chatFile.files?.[0];
+  let audio = null, audioName = '';
   if (file) {
-    if (file.size > 420 * 1024) { joinError.textContent = 'A imagem deve ter no máximo 420 KB.'; return; }
-    image = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file); });
+    if (file.size > 900 * 1024) { joinError.textContent = 'A mídia deve ter no máximo 900 KB.'; return; }
+    const reader = await new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
+    if (/^audio\//i.test(file.type) || /\.(mp3|wav|ogg|webm)$/i.test(file.name)) { audio = reader; audioName = file.name; }
+    else if (/^image\//i.test(file.type) || /\.(png|jpe?g|gif|webp)$/i.test(file.name)) image = reader;
+    else { joinError.textContent = 'Use uma imagem ou MP3/WAV/OGG.'; return; }
   }
-  const message = chatInput.value.trim(); if (!message && !image) return;
+  if (chatFile) chatFile.accept = 'image/*,audio/*,.mp3,.wav,.ogg,.webm';
+  const message = chatInput.value.trim(); if (!message && !image && !audio) return;
   try {
-    const r = await fetch(`${apiBase}/api/aposta/${encodeURIComponent(id)}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewer, message, image }) });
+    const r = await fetch(`${apiBase}/api/aposta/${encodeURIComponent(id)}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewer, message, image, audio, audioName }) });
     const p = await r.json(); if (!r.ok || !p.ok) throw new Error(p.error || 'Falha no chat.');
     renderChat(p.chat || []); chatInput.value = ''; chatFile.value = '';
   } catch (error) { console.warn('Arena chat', error); }
 });
+
+let lastSpectatorSend = 0;
+function syncSpectatorMovement(now) {
+  if (!viewer || camMode !== 'free' || now - lastSpectatorSend < 160) return;
+  lastSpectatorSend = now;
+  fetch(`${apiBase}/api/aposta/${encodeURIComponent(id)}/mover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewer, x: freePos.x, z: freePos.z, rotation: yaw }) }).catch(() => {});
+}
 
 function targetFor() {
   if (!data) return CENTER;
@@ -264,7 +341,7 @@ function updateFreeCamera() {
   const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
   const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
   if (keys.w) freePos.addScaledVector(forward, speed); if (keys.s) freePos.addScaledVector(forward, -speed);
-  if (keys.d) freePos.addScaledVector(right, speed); if (keys.a) freePos.addScaledVector(right, -speed);
+  if (keys.a) freePos.addScaledVector(right, speed); if (keys.d) freePos.addScaledVector(right, -speed);
   if (keys.space) freePos.y += speed; if (keys.control) freePos.y -= speed;
   freePos.x = THREE.MathUtils.clamp(freePos.x, 5, MAP.size.x - 5); freePos.z = THREE.MathUtils.clamp(freePos.z, 5, MAP.size.z - 5); freePos.y = THREE.MathUtils.clamp(freePos.y, 2, 100);
   camera.position.lerp(freePos, .18);
@@ -273,7 +350,8 @@ function updateFreeCamera() {
 function animate() {
   requestAnimationFrame(animate);
   for (const side of ['A', 'B']) { bots[side].position.lerp(botTargets[side], .16); bots[side].rotation.y = THREE.MathUtils.lerp(bots[side].rotation.y, botRotations[side], .16); }
-  if (camMode === 'free') updateFreeCamera();
+  for (const o of spectatorLayer.children) { if (o.userData.target) { o.position.lerp(o.userData.target, .22); o.rotation.y = THREE.MathUtils.lerp(o.rotation.y, Number(o.userData.rotation || 0), .22); } }
+  if (camMode === 'free') { updateFreeCamera(); syncSpectatorMovement(performance.now()); }
   else { const t = targetFor(); if (camMode === 'overview' || (camMode === 'auto' && data?.camera?.target === 'overview')) { const desired = CENTER.clone().add(new THREE.Vector3(0, Math.max(62, MAP.size.x * .29), Math.max(12, MAP.size.z * .08))); camera.position.lerp(desired, .035); } else camera.position.lerp(t.clone().add(new THREE.Vector3(-13, 8, -13)), .06); camera.lookAt(t); }
   for (const o of spectatorLayer.children) { const label = o.children[2]; if (label) label.lookAt(camera.position); }
   renderer.render(scene, camera);
