@@ -171,8 +171,11 @@ function playArenaSound(sound) {
 }
 function processSoundEvents(list = [], soundboard = {}) {
   for (const e of list) {
+    // Eventos do motor podem chegar antes do /?media=1. Quando houver URL no
+    // próprio evento, toca imediatamente; caso contrário espera o soundboard.
     const sb = soundboard[e.name];
-    if (sb?.url) playArenaSound({ ...e, url: sb.url });
+    const url = sb?.url || e.url;
+    if (url) playArenaSound({ ...e, url });
   }
 }
 
@@ -199,7 +202,7 @@ function updateWorldBoards(list = []) {
   for (const [id, o] of boardObjects) if (!seen.has(id)) { o.traverse(n => { if (n.material?.map) n.material.map.dispose?.(); n.geometry?.dispose?.(); }); boardLayer.remove(o); boardObjects.delete(id); }
 }
 
-let mediaRevision = -1, mediaLoaded = false;
+let mediaRevision = -1, mediaLoaded = false, mediaSeq = 0;
 let data = null, camMode = 'auto', keys = Object.create(null), yaw = 0, pitch = -.25, pointerLocked = false;
 const freePos = new THREE.Vector3(MAP.size.x / 2, 35, MAP.size.z / 2);
 function setCam(mode) {
@@ -239,6 +242,24 @@ async function refreshArenaMedia(revision) {
   } catch {}
 }
 
+function processMediaEvents(events = []) {
+  for (const e of events) {
+    const seq = Number(e.seq || 0);
+    if (seq <= mediaSeq) continue;
+    mediaSeq = Math.max(mediaSeq, seq);
+    if (e.type === 'sound') {
+      data = data || {};
+      data.soundboard = data.soundboard || {};
+      data.soundboard[e.name] = { name: e.name, url: e.url, owner: e.owner };
+      playArenaSound({ id: `media-${seq}`, name: e.name, url: e.url, pitch: 1, volume: .9 });
+    } else if (e.type === 'board') {
+      data = data || {};
+      data.worldBoards = data.worldBoards || [];
+      updateWorldBoards([...data.worldBoards.filter(b => b.id !== e.id), e]);
+    }
+  }
+}
+
 function updateUI(d) {
   document.querySelector('#round').textContent = `ROUND ${d.round || 1}`;
   document.querySelector('#score').textContent = `${d.score?.A || 0} : ${d.score?.B || 0}`;
@@ -271,8 +292,8 @@ function updateUI(d) {
 async function poll() {
   if (!id) return;
   try {
-    const r = await fetch(api(), { cache: 'no-store' }); if (!r.ok) throw new Error(`API ${r.status}`);
-    const p = await r.json(); if (!p.ok) throw new Error(p.error || 'API inválida'); data = p; updateUI(p);
+    const r = await fetch(`${api()}&mediaSince=${encodeURIComponent(mediaSeq)}`, { cache: 'no-store' }); if (!r.ok) throw new Error(`API ${r.status}`);
+    const p = await r.json(); if (!p.ok) throw new Error(p.error || 'API inválida'); data = p; processMediaEvents(p.mediaEvents || []); updateUI(p);
   } catch (e) {
     console.warn('Arena API', e); document.querySelector('#phase').textContent = 'RECONECTANDO'; if (connection) connection.textContent = 'RECONECTANDO';
   }
@@ -317,15 +338,27 @@ chatForm.addEventListener('submit', async e => {
   try {
     const r = await fetch(`${apiBase}/api/aposta/${encodeURIComponent(id)}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewer, message, image, audio, audioName }) });
     const p = await r.json(); if (!r.ok || !p.ok) throw new Error(p.error || 'Falha no chat.');
-    renderChat(p.chat || []); chatInput.value = ''; chatFile.value = '';
+    renderChat(p.chat || []);
+    processMediaEvents(p.mediaEvents || []);
+    if (Array.isArray(p.soundEvents)) processSoundEvents(p.soundEvents, data?.soundboard || {});
+    if (Array.isArray(p.worldBoards)) updateWorldBoards(p.worldBoards);
+    if (p.mediaRevision != null && Number(p.mediaRevision) !== mediaRevision) void refreshArenaMedia(Number(p.mediaRevision));
+    chatInput.value = ''; chatFile.value = '';
   } catch (error) { console.warn('Arena chat', error); }
 });
 
 let lastSpectatorSend = 0;
 function syncSpectatorMovement(now) {
-  if (!viewer || camMode !== 'free' || now - lastSpectatorSend < 160) return;
+  if (!viewer || camMode !== 'free' || now - lastSpectatorSend < 80) return;
   lastSpectatorSend = now;
-  fetch(`${apiBase}/api/aposta/${encodeURIComponent(id)}/mover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewer, x: freePos.x, y: Math.max(1.7, freePos.y - 1.7), z: freePos.z, rotation: yaw }) }).catch(() => {});
+  const feetY = Math.max(0, freePos.y - 1.7);
+  fetch(`${apiBase}/api/aposta/${encodeURIComponent(id)}/mover`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewer, x: freePos.x, y: feetY, z: freePos.z, rotation: yaw }) }).catch(() => {});
+  // Não espere o próximo poll para mover o boneco local.
+  const me = spectatorObjects.get(String(data?.viewer?.publicId || ''));
+  if (me) {
+    me.userData.target = new THREE.Vector3(freePos.x, feetY, freePos.z);
+    me.userData.rotation = yaw;
+  }
 }
 
 function targetFor() {
@@ -346,6 +379,8 @@ function updateFreeCamera() {
   freePos.x = THREE.MathUtils.clamp(freePos.x, 5, MAP.size.x - 5); freePos.z = THREE.MathUtils.clamp(freePos.z, 5, MAP.size.z - 5); freePos.y = THREE.MathUtils.clamp(freePos.y, 2, 100);
   camera.position.lerp(freePos, .18);
   const dir = new THREE.Vector3(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch)); camera.lookAt(camera.position.clone().add(dir));
+  const me = spectatorObjects.get(String(data?.viewer?.publicId || ''));
+  if (me) { me.userData.target = new THREE.Vector3(freePos.x, Math.max(0, freePos.y - 1.7), freePos.z); me.userData.rotation = yaw; }
 }
 function animate() {
   requestAnimationFrame(animate);
