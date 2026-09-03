@@ -154,26 +154,76 @@ function updateProjectiles(projectiles = []) {
 
 const audioCache = new Map();
 const playedSoundIds = new Set();
+const pendingArenaSounds = [];
 let audioUnlocked = false;
-function unlockArenaAudio() {
-  if (audioUnlocked) return;
-  const a = new Audio(); a.volume = 0; a.play().catch(() => {}); audioUnlocked = true;
+let audioContext = null;
+
+function getArenaAudioContext() {
+  try {
+    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    return audioContext;
+  } catch { return null; }
 }
-addEventListener('pointerdown', unlockArenaAudio, { once: true, passive: true });
-addEventListener('keydown', unlockArenaAudio, { once: true, passive: true });
-function playArenaSound(sound) {
-  const url = String(sound?.url || '').trim();
+
+function normalizeArenaAudioUrl(raw) {
+  const url = String(raw || '').trim();
+  if (!url.startsWith('data:')) return url;
+  // Alguns uploads chegam como data:audio/mpeg, mas o conteúdo é Ogg/Vorbis
+  // (começa com "OggS"). Corrige o MIME antes do HTMLAudio tentar tocar.
+  if (/^data:audio\/mpeg[;,]/i.test(url) && /;base64,T2dnUw/i.test(url)) {
+    return url.replace(/^data:audio\/mpeg/i, 'data:audio/ogg');
+  }
+  return url;
+}
+
+function unlockArenaAudio() {
+  const ctx = getArenaAudioContext();
+  const resume = ctx?.resume ? ctx.resume().catch(() => {}) : Promise.resolve();
+  Promise.resolve(resume).then(() => {
+    const probe = new Audio();
+    probe.volume = 0;
+    probe.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
+    return probe.play().then(() => {
+      probe.pause();
+      audioUnlocked = true;
+      const pending = pendingArenaSounds.splice(0);
+      for (const sound of pending) playArenaSound(sound, true);
+    }).catch(() => {
+      // Continua bloqueado; o próximo clique/touch tenta novamente.
+    });
+  });
+}
+addEventListener('pointerdown', unlockArenaAudio, { passive: true });
+addEventListener('keydown', unlockArenaAudio, { passive: true });
+
+function playArenaSound(sound, fromQueue = false) {
+  const rawUrl = String(sound?.url || '').trim();
+  const url = normalizeArenaAudioUrl(rawUrl);
   if (!url || playedSoundIds.has(sound.id)) return;
+  if (!audioUnlocked && !fromQueue) {
+    if (pendingArenaSounds.length < 40) pendingArenaSounds.push({ ...sound, url });
+    return;
+  }
   playedSoundIds.add(sound.id);
   if (playedSoundIds.size > 300) playedSoundIds.delete(playedSoundIds.values().next().value);
   let a = audioCache.get(url);
-  if (!a) { a = new Audio(); a.preload = 'auto'; a.src = url; audioCache.set(url, a); }
+  if (!a) {
+    a = new Audio();
+    a.preload = 'auto';
+    a.src = url;
+    a.crossOrigin = 'anonymous';
+    audioCache.set(url, a);
+  }
   a.pause(); a.currentTime = 0;
   a.volume = THREE.MathUtils.clamp(Number(sound.volume ?? .85), 0, 1);
-  // Tiros ficam praticamente no pitch original: 0.98–1.02.
   a.playbackRate = THREE.MathUtils.clamp(Number(sound.pitch ?? 1), .96, 1.04);
   const promise = a.play();
-  if (promise?.catch) promise.catch(err => console.debug('Arena sound não reproduzido:', url, err?.message || err));
+  if (promise?.catch) promise.catch(err => {
+    // Se o navegador ainda considerar autoplay bloqueado, devolve o evento à fila.
+    playedSoundIds.delete(sound.id);
+    if (!audioUnlocked && pendingArenaSounds.length < 40) pendingArenaSounds.push({ ...sound, url });
+    console.debug('Arena sound não reproduzido:', err?.message || err);
+  });
 }
 function processSoundEvents(list = [], soundboard = {}) {
   for (const e of list) {
